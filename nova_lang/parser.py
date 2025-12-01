@@ -26,6 +26,7 @@ class Parser:
             self.advance()
             return t
         expected = ', '.join(t.name for t in types)
+        # Original error logic, which is fine for most generic mismatches
         raise ParserError(f"Expected {expected} at line {self.current.line}, col {self.current.col}, got {self.current.type}")
 
     def parse(self):
@@ -62,6 +63,7 @@ class Parser:
         elif t == TokenType.FUNC:
             return self.func_def()
         else:
+            # Use the current token's line for general unexpected tokens
             raise ParserError(f"Unexpected token {self.current.type} at line {self.current.line}")
 
     def var_decl(self):
@@ -102,38 +104,40 @@ class Parser:
         name = self.match(TokenType.IDENT).value
         return Take(name)
 
+    # MODIFIED: Capture the token and pass it to block()
     def when_stmt(self):
         cases = []
         else_block = None
 
         # when cond { stmts }
-        self.match(TokenType.WHEN)
+        when_token = self.match(TokenType.WHEN) # CAPTURE TOKEN
         cond = self.expr()
-        block = self.block()
+        block = self.block(when_token) # PASS TOKEN
         cases.append((cond, block))
 
         # elsewhen*
         while self.current.type == TokenType.ELSEWHEN:
-            self.match(TokenType.ELSEWHEN)
+            elsewhen_token = self.match(TokenType.ELSEWHEN) # CAPTURE TOKEN
             cond = self.expr()
-            block = self.block()
+            block = self.block(elsewhen_token) # PASS TOKEN
             cases.append((cond, block))
 
         # else optional
         if self.current.type == TokenType.ELSE:
-            self.match(TokenType.ELSE)
-            else_block = self.block()
+            else_token = self.match(TokenType.ELSE) # CAPTURE TOKEN
+            else_block = self.block(else_token) # PASS TOKEN
 
         return When(cases, else_block)
 
+    # MODIFIED: Capture the token and pass it to block()
     def loop_stmt(self):
-        self.match(TokenType.LOOP)
+        loop_token = self.match(TokenType.LOOP) # CAPTURE TOKEN
         var = self.match(TokenType.IDENT).value
         self.match(TokenType.ASSIGN)
         start_expr = self.expr()
         self.match(TokenType.TO)
         end_expr = self.expr()
-        body = self.block()
+        body = self.block(loop_token) # PASS TOKEN (will use 'loop' line if LBRACE is missing)
         return Loop(var, start_expr, end_expr, body)
 
     def func_def(self):
@@ -148,7 +152,8 @@ class Parser:
                 params.append(self.match(TokenType.IDENT).value)
         self.match(TokenType.RPAREN)
         # body { stmts back expr }
-        self.match(TokenType.LBRACE)
+        # NOTE: func_def handles LBRACE check manually, so no change needed here
+        self.match(TokenType.LBRACE) 
         body = []
         back_expr = None
         while self.current.type != TokenType.BACK:
@@ -160,7 +165,14 @@ class Parser:
         self.match(TokenType.RBRACE)
         return FuncDef(name, params, body, back_expr)
 
-    def block(self):
+    # MODIFIED: Added context_token argument and manual check for LBRACE
+    def block(self, context_token):
+        # Manual check for LBRACE to use the line number of the preceding statement (context_token)
+        if self.current.type != TokenType.LBRACE:
+            # Raise the error, explicitly using the line from the preceding token (e.g., 'when')
+            # This ensures the highlight goes to line 4 for your example.
+            raise ParserError(f"Expected LBRACE at line {context_token.line}, col {context_token.col + len(context_token.value)}, got {self.current.type}")
+        
         self.match(TokenType.LBRACE)
         stmts = self.statements()
         self.match(TokenType.RBRACE)

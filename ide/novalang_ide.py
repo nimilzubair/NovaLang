@@ -47,6 +47,9 @@ class CompilationThread(QThread):
             self.compilation_done.emit(f"Semantic Error: {str(e)}", False)
         except Exception as e:
             self.compilation_done.emit(f"Unexpected Error: {str(e)}", False)
+# Assuming necessary imports from PyQt6 and your other files are present,
+# such as: from PyQt6.QtGui import QFont, QColor, QTextFormat, QTextCursor
+# and: from PyQt6.QtWidgets import QPlainTextEdit, QTextEdit
 
 class CodeEditorWithLineNumbers(QPlainTextEdit):
     """Code editor with line numbers"""
@@ -59,6 +62,10 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
         # Initialize color variables
         self.line_number_bg_color = QColor(53, 53, 53)  # Default dark
         self.line_number_fg_color = QColor(200, 200, 200)  # Default light gray
+        
+        # ADDED: Property to track the error line (1-indexed)
+        self.error_line = -1 
+        
         # Line number area
         self.line_number_area = LineNumberArea(self)
         
@@ -71,7 +78,9 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
         self.update_line_number_area_width(0)
         
         # Apply syntax highlighting
-        self.highlighter = NovaLangHighlighter(self.document())
+        # Assuming NovaLangHighlighter is imported: 
+        # from .syntax_highlighter import NovaLangHighlighter
+        self.highlighter = NovaLangHighlighter(self.document()) 
         
         self.highlight_current_line()
         
@@ -98,8 +107,8 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
             self.line_number_area.scroll(0, dy)
         else:
             self.line_number_area.update(0, rect.y(), 
-                                        self.line_number_area.width(), 
-                                        rect.height())
+                                         self.line_number_area.width(), 
+                                         rect.height())
     
     def resizeEvent(self, event):
         """Handle resize events"""
@@ -108,12 +117,14 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
         self.line_number_area.setGeometry(cr.left(), cr.top(), 
                                          self.line_number_area_width(), cr.height())
         
+    # MODIFIED: highlight_current_line to include error highlighting logic
     def highlight_current_line(self):
-        """Highlight the current line"""
+        """Highlight the current line and the error line if set"""
         extra_selections = []
         
+        # 1. Current line highlighting
         if not self.isReadOnly():
-            selection = QTextEdit.ExtraSelection()  # Use QTextEdit instead
+            selection = QTextEdit.ExtraSelection()
             line_color = QColor(40, 40, 50)
             
             selection.format.setBackground(line_color)
@@ -123,7 +134,47 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
             
             extra_selections.append(selection)
         
-        self.setExtraSelections(extra_selections)    
+        # 2. Error line highlighting (NEW)
+        if self.error_line != -1:
+            error_selection = QTextEdit.ExtraSelection()
+            # Prominent red color: semi-transparent dark red for background fill
+            error_color = QColor(180, 50, 50, 150)
+            
+            error_selection.format.setBackground(error_color)
+            error_selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            
+            # Find the block corresponding to the error line (1-indexed line -> 0-indexed block)
+            block = self.document().findBlockByNumber(self.error_line - 1)
+            
+            if block.isValid():
+                from PyQt6.QtGui import QTextCursor # Ensure QTextCursor is available
+                cursor = QTextCursor(block)
+                cursor.clearSelection()
+                error_selection.cursor = cursor
+                extra_selections.append(error_selection)
+        
+        self.setExtraSelections(extra_selections) 
+        
+    # NEW METHOD: To set and apply the error highlighting
+    def highlight_error_line(self, line_num):
+        """Set the line number for error highlighting (1-indexed)"""
+        self.error_line = line_num
+        self.highlight_current_line() # Re-apply selections to show the error
+        
+        # Scroll to the error line for visibility
+        block = self.document().findBlockByNumber(line_num - 1)
+        if block.isValid():
+            from PyQt6.QtGui import QTextCursor
+            cursor = QTextCursor(block)
+            self.setTextCursor(cursor)
+            self.ensureCursorVisible()
+
+    # NEW METHOD: To clear the error highlighting
+    def clear_error_highlighting(self):
+        """Clear the error line highlighting"""
+        if self.error_line != -1:
+            self.error_line = -1
+            self.highlight_current_line() # Re-apply selections to clear the highlight
 
     def apply_dark_theme(self):
         """Apply dark theme to editor"""
@@ -177,6 +228,9 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
     
     def line_number_area_paint_event(self, event):
         """Paint line numbers"""
+        from PyQt6.QtGui import QPainter
+        from PyQt6.QtCore import Qt
+        
         painter = QPainter(self.line_number_area)
         painter.fillRect(event.rect(), self.line_number_bg_color)
         
@@ -191,9 +245,9 @@ class CodeEditorWithLineNumbers(QPlainTextEdit):
                 number = str(block_number + 1)
                 painter.setPen(self.line_number_fg_color)
                 painter.drawText(0, int(top), 
-                               self.line_number_area.width() - 5,
-                               self.fontMetrics().height(),
-                               Qt.AlignmentFlag.AlignRight, number)
+                                 self.line_number_area.width() - 5,
+                                 self.fontMetrics().height(),
+                                 Qt.AlignmentFlag.AlignRight, number)
             
             block = block.next()
             top = bottom
@@ -432,7 +486,31 @@ class NovaLangIDE(QMainWindow):
         else:
             self.output_text.setText(f"❌ {message}")
             self.status_bar.showMessage("Compilation failed", 3000)
-    
+    def on_compilation_done(self, message, success):
+        """Handle compilation result"""
+        # Clear previous error highlighting
+        self.editor.clear_error_highlighting()
+        
+        if success:
+            self.output_text.setText(f"✅ {message}")
+            self.status_bar.showMessage("Compilation successful", 3000)
+        else:
+            self.output_text.setText(f"❌ {message}")
+            self.status_bar.showMessage("Compilation failed", 3000)
+
+            # --- New logic to extract and highlight error line ---
+            import re
+            
+            # Regex to find line number from the error message.
+            # Assuming Lexer, Parser, and Semantic errors all contain 'line X'
+            match = re.search(r'line (\d+)', message)
+            
+            if match:
+                line_num = int(match.group(1))
+                self.editor.highlight_error_line(line_num)
+                # Scroll to the error line for visibility
+                self.editor.ensureCursorVisible() 
+            # ---------------------------------------------------
     def apply_light_theme(self):
         """Apply light theme to the entire IDE"""
         # Apply to editor
