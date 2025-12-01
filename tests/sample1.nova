@@ -1,0 +1,37 @@
+# File: sample1.nova
+start
+# Simple NovaLang program
+num count = 10
+text greeting = "Hello, NovaLang!"
+flag is_active = true
+
+show greeting
+
+# Conditional statement
+when count > 5 {
+    show "Count is greater than 5"
+} elsewhen count == 5 {
+    show "Count is exactly 5"
+} else {
+    show "Count is less than 5"
+}
+
+# Loop example
+loop i = 1 to 5 {
+    show i
+}
+
+# Function definition and call
+func multiply(x, y) {
+    back x * y
+}
+
+num result = multiply(3, 4)
+show result
+
+# Take input (simulated)
+text name = "User"
+take name
+show "Hello, " + name
+
+end
