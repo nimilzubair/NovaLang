@@ -1,3 +1,4 @@
+# File: nova_lang/lexer.py
 """
 NovaLang Regex Lexer with line/column tracking
 """
@@ -10,6 +11,7 @@ class LexerError(Exception):
 
 class Lexer:
     token_spec = [
+        # Keywords
         ('START', r'start\b'),
         ('END', r'end\b'),
         ('SHOW', r'show\b'),
@@ -28,10 +30,12 @@ class Lexer:
         ('FALSE', r'false\b'),
         ('TO', r'to\b'),
 
+        # Literals
         ('NUMBER', r'\d+'),
         ('STRING', r'"[^"]*"'),
         ('IDENT', r'[A-Za-z_][A-Za-z0-9_]*'),
 
+        # Operators
         ('EQEQ', r'=='),
         ('NOTEQ', r'!='),
         ('GTEQ', r'>='),
@@ -43,12 +47,18 @@ class Lexer:
         ('MINUS', r'-'),
         ('STAR', r'\*'),
         ('SLASH', r'/'),
+
+        # Punctuation
         ('COMMA', r','),
         ('LPAREN', r'\('),
         ('RPAREN', r'\)'),
         ('LBRACE', r'\{'),
         ('RBRACE', r'\}'),
 
+        # Comments - must come before SKIP to handle them properly
+        ('COMMENT', r'#.*'),
+
+        # Whitespace
         ('SKIP', r'[ \t]+'),
         ('NEWLINE', r'\n'),
         ('MISMATCH', r'.')
@@ -106,7 +116,19 @@ class Lexer:
         for m in self.regex.finditer(self.text):
             kind = m.lastgroup
             value = m.group()
-            if kind == 'NEWLINE':
+            
+            if kind == 'COMMENT':
+                # Comments are ignored - just update line/col if needed
+                # Check if comment contains newlines
+                if '\n' in value:
+                    # Update line count for multi-line comments (though # comments should be single-line)
+                    lines = value.count('\n')
+                    self.line += lines
+                    self.col = 1
+                else:
+                    self.col += len(value)
+                continue
+            elif kind == 'NEWLINE':
                 self.line += 1
                 self.col = 1
                 continue
@@ -116,8 +138,13 @@ class Lexer:
             elif kind == 'MISMATCH':
                 raise LexerError(f"Unexpected character {value!r} at line {self.line}, col {self.col}")
             else:
-                ttype = self.type_map[kind]
+                ttype = self.type_map.get(kind)
+                if ttype is None:
+                    # This shouldn't happen if token_spec is complete
+                    continue
+                    
                 token = Token(ttype, value, self.line, self.col)
                 yield token
                 self.col += len(value)
+        
         yield Token(TokenType.EOF, '', self.line, self.col)
