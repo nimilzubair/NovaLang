@@ -1,368 +1,207 @@
-# File: ide/novalang_ide.py (complete fix)
+# File: ide/novalang_ide.py
 """
-NovaLang IDE - PyQt6 Version
+NovaLang IDE - Main Application
+Professional IDE with modern UI for NovaLang programming language
 """
+
 import sys
 import os
-from ide.themes import get_theme
-from ide.syntax_highlighter import NovaLangHighlighter
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QTextEdit, QSplitter, QStatusBar, 
-                             QToolBar, QFileDialog, QMessageBox, QPlainTextEdit)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QTextCursor, QColor, QPalette, QPainter, QTextFormat
+import subprocess
+import re
 
-from nova_lang.lexer import Lexer, LexerError
-from nova_lang.parser import Parser, ParserError
-from nova_lang.semantic import SemanticAnalyzer, SemanticError
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTextEdit, QSplitter, QStatusBar, QToolBar, QFileDialog,
+    QMessageBox, QPushButton, QLabel, QFrame
+)
+from PyQt6.QtGui import QAction, QFont, QKeySequence
+from PyQt6.QtCore import Qt
 
-class CompilationThread(QThread):
-    """Thread for running compilation to avoid freezing UI"""
-    compilation_done = pyqtSignal(str, bool)  # message, success
-    
-    def __init__(self, code):
-        super().__init__()
-        self.code = code
-    
-    def run(self):
-        try:
-            # Lexical analysis
-            lexer = Lexer(self.code)
-            tokens = list(lexer.generate_tokens())
-            
-            # Parsing
-            parser = Parser(tokens)
-            ast = parser.parse()
-            
-            # Semantic analysis
-            sem = SemanticAnalyzer()
-            sem.analyze(ast)
-            
-            self.compilation_done.emit("Compilation successful!", True)
-        except LexerError as e:
-            self.compilation_done.emit(f"Lexer Error: {str(e)}", False)
-        except ParserError as e:
-            self.compilation_done.emit(f"Parser Error: {str(e)}", False)
-        except SemanticError as e:
-            self.compilation_done.emit(f"Semantic Error: {str(e)}", False)
-        except Exception as e:
-            self.compilation_done.emit(f"Unexpected Error: {str(e)}", False)
-# Assuming necessary imports from PyQt6 and your other files are present,
-# such as: from PyQt6.QtGui import QFont, QColor, QTextFormat, QTextCursor
-# and: from PyQt6.QtWidgets import QPlainTextEdit, QTextEdit
+from editor import CodeEditorWithLineNumbers
+from themes import get_theme
 
-class CodeEditorWithLineNumbers(QPlainTextEdit):
-    """Code editor with line numbers"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFont(QFont("Consolas" if QFont("Consolas").exactMatch() else "Courier New", 11))
-        self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(' '))
-        
-        # Initialize color variables
-        self.line_number_bg_color = QColor(53, 53, 53)  # Default dark
-        self.line_number_fg_color = QColor(200, 200, 200)  # Default light gray
-        
-        # ADDED: Property to track the error line (1-indexed)
-        self.error_line = -1 
-        
-        # Line number area
-        self.line_number_area = LineNumberArea(self)
-        
-        # Connect signals
-        self.blockCountChanged.connect(self.update_line_number_area_width)
-        self.updateRequest.connect(self.update_line_number_area)
-        self.cursorPositionChanged.connect(self.highlight_current_line)
-        
-        # Initial setup
-        self.update_line_number_area_width(0)
-        
-        # Apply syntax highlighting
-        # Assuming NovaLangHighlighter is imported: 
-        # from .syntax_highlighter import NovaLangHighlighter
-        self.highlighter = NovaLangHighlighter(self.document()) 
-        
-        self.highlight_current_line()
-        
-        # Apply dark theme by default
-        self.apply_dark_theme()
-
-    def line_number_area_width(self):
-        """Calculate width needed for line numbers"""
-        digits = 1
-        max_num = max(1, self.blockCount())
-        while max_num >= 10:
-            max_num /= 10
-            digits += 1
-        space = 10 + self.fontMetrics().horizontalAdvance('9') * digits
-        return space
-    
-    def update_line_number_area_width(self, new_block_count):
-        """Update the editor margins to accommodate line numbers"""
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
-    
-    def update_line_number_area(self, rect, dy):
-        """Update the line number area"""
-        if dy:
-            self.line_number_area.scroll(0, dy)
-        else:
-            self.line_number_area.update(0, rect.y(), 
-                                         self.line_number_area.width(), 
-                                         rect.height())
-    
-    def resizeEvent(self, event):
-        """Handle resize events"""
-        super().resizeEvent(event)
-        cr = self.contentsRect()
-        self.line_number_area.setGeometry(cr.left(), cr.top(), 
-                                         self.line_number_area_width(), cr.height())
-        
-    # MODIFIED: highlight_current_line to include error highlighting logic
-    def highlight_current_line(self):
-        """Highlight the current line and the error line if set"""
-        extra_selections = []
-        
-        # 1. Current line highlighting
-        if not self.isReadOnly():
-            selection = QTextEdit.ExtraSelection()
-            line_color = QColor(40, 40, 50)
-            
-            selection.format.setBackground(line_color)
-            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-            selection.cursor = self.textCursor()
-            selection.cursor.clearSelection()
-            
-            extra_selections.append(selection)
-        
-        # 2. Error line highlighting (NEW)
-        if self.error_line != -1:
-            error_selection = QTextEdit.ExtraSelection()
-            # Prominent red color: semi-transparent dark red for background fill
-            error_color = QColor(180, 50, 50, 150)
-            
-            error_selection.format.setBackground(error_color)
-            error_selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-            
-            # Find the block corresponding to the error line (1-indexed line -> 0-indexed block)
-            block = self.document().findBlockByNumber(self.error_line - 1)
-            
-            if block.isValid():
-                from PyQt6.QtGui import QTextCursor # Ensure QTextCursor is available
-                cursor = QTextCursor(block)
-                cursor.clearSelection()
-                error_selection.cursor = cursor
-                extra_selections.append(error_selection)
-        
-        self.setExtraSelections(extra_selections) 
-        
-    # NEW METHOD: To set and apply the error highlighting
-    def highlight_error_line(self, line_num):
-        """Set the line number for error highlighting (1-indexed)"""
-        self.error_line = line_num
-        self.highlight_current_line() # Re-apply selections to show the error
-        
-        # Scroll to the error line for visibility
-        block = self.document().findBlockByNumber(line_num - 1)
-        if block.isValid():
-            from PyQt6.QtGui import QTextCursor
-            cursor = QTextCursor(block)
-            self.setTextCursor(cursor)
-            self.ensureCursorVisible()
-
-    # NEW METHOD: To clear the error highlighting
-    def clear_error_highlighting(self):
-        """Clear the error line highlighting"""
-        if self.error_line != -1:
-            self.error_line = -1
-            self.highlight_current_line() # Re-apply selections to clear the highlight
-
-    def apply_dark_theme(self):
-        """Apply dark theme to editor"""
-        from ide.themes import get_theme
-        theme = get_theme("dark")
-        
-        self.setStyleSheet(f"""
-            QPlainTextEdit {{
-                background-color: {theme['background']};
-                color: {theme['foreground']};
-                selection-background-color: {theme['selection']};
-                border: none;
-            }}
-        """)
-        
-        # Set line number colors
-        self.line_number_bg_color = QColor(theme['line_numbers']['background'])
-        self.line_number_fg_color = QColor(theme['line_numbers']['foreground'])
-        
-        # Update the highlighter with theme colors
-        self.highlighter.set_theme_colors(theme['tokens'])
-        self.highlighter.rehighlight()
-        
-        # Update line number area
-        self.line_number_area.update()
-    
-    def apply_light_theme(self):
-        """Apply light theme to editor"""
-        from ide.themes import get_theme
-        theme = get_theme("light")
-        
-        self.setStyleSheet(f"""
-            QPlainTextEdit {{
-                background-color: {theme['background']};
-                color: {theme['foreground']};
-                selection-background-color: {theme['selection']};
-                border: none;
-            }}
-        """)
-        
-        # Set line number colors
-        self.line_number_bg_color = QColor(theme['line_numbers']['background'])
-        self.line_number_fg_color = QColor(theme['line_numbers']['foreground'])
-        
-        # Update the highlighter with theme colors
-        self.highlighter.set_theme_colors(theme['tokens'])
-        self.highlighter.rehighlight()
-        
-        # Update line number area
-        self.line_number_area.update()
-    
-    def line_number_area_paint_event(self, event):
-        """Paint line numbers"""
-        from PyQt6.QtGui import QPainter
-        from PyQt6.QtCore import Qt
-        
-        painter = QPainter(self.line_number_area)
-        painter.fillRect(event.rect(), self.line_number_bg_color)
-        
-        block = self.firstVisibleBlock()
-        block_number = block.blockNumber()
-        top = self.blockBoundingGeometry(block).translated(
-            self.contentOffset()).top()
-        bottom = top + self.blockBoundingRect(block).height()
-        
-        while block.isValid() and top <= event.rect().bottom():
-            if block.isVisible() and bottom >= event.rect().top():
-                number = str(block_number + 1)
-                painter.setPen(self.line_number_fg_color)
-                painter.drawText(0, int(top), 
-                                 self.line_number_area.width() - 5,
-                                 self.fontMetrics().height(),
-                                 Qt.AlignmentFlag.AlignRight, number)
-            
-            block = block.next()
-            top = bottom
-            bottom = top + self.blockBoundingRect(block).height()
-            block_number += 1
-
-    def get_text(self):
-        """Get editor text"""
-        return self.toPlainText()
-    
-    def set_text(self, text):
-        """Set editor text"""
-        self.setPlainText(text)
-        self.document().setModified(False)
-
-class LineNumberArea(QWidget):
-    """Widget to display line numbers"""
-    def __init__(self, editor):
-        super().__init__(editor)
-        self.editor = editor
-    
-    def sizeHint(self):
-        return self.editor.line_number_area_width()
-    
-    def paintEvent(self, event):
-        self.editor.line_number_area_paint_event(event)
 
 class NovaLangIDE(QMainWindow):
+    """Main IDE window for NovaLang"""
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NovaLang IDE")
-        self.setGeometry(100, 100, 1200, 700)
-        
+        self.setGeometry(100, 100, 1400, 800)
         self.current_file = None
         
         self.init_ui()
         self.create_actions()
         self.create_menu()
         self.create_toolbar()
-        
-        # Apply dark theme
         self.apply_dark_theme()
-        
-        # Load sample code
         self.load_sample_code()
-    
+
     def init_ui(self):
-        # Central widget
+        """Initialize the user interface"""
+        # Main container
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
-        # Main layout
-        main_layout = QHBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
-        # Splitter for editor and output
+        # Editor and output splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Editor widget
-        self.editor = CodeEditorWithLineNumbers()
+        # Left panel - Editor
+        editor_panel = QWidget()
+        editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(0)
         
-        # Output widget
+        # Editor header
+        editor_header = QFrame()
+        editor_header.setFrameShape(QFrame.Shape.StyledPanel)
+        editor_header.setMaximumHeight(35)
+        editor_header_layout = QHBoxLayout(editor_header)
+        editor_header_layout.setContentsMargins(10, 5, 10, 5)
+        
+        editor_label = QLabel("📝 Editor")
+        editor_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        editor_header_layout.addWidget(editor_label)
+        editor_header_layout.addStretch()
+        
+        # Run button in header
+        self.run_btn = QPushButton("▶ Run")
+        self.run_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                padding: 6px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QPushButton:pressed {
+                background-color: #0d5689;
+            }
+        """)
+        self.run_btn.clicked.connect(self.compile_code_backend)
+        editor_header_layout.addWidget(self.run_btn)
+        
+        editor_layout.addWidget(editor_header)
+        
+        # Code editor
+        self.editor = CodeEditorWithLineNumbers()
+        editor_layout.addWidget(self.editor)
+        
+        # Right panel - Output
+        output_panel = QWidget()
+        output_layout = QVBoxLayout(output_panel)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(0)
+        
+        # Output header
+        output_header = QFrame()
+        output_header.setFrameShape(QFrame.Shape.StyledPanel)
+        output_header.setMaximumHeight(35)
+        output_header_layout = QHBoxLayout(output_header)
+        output_header_layout.setContentsMargins(10, 5, 10, 5)
+        
+        output_label = QLabel("📤 Output")
+        output_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        output_header_layout.addWidget(output_label)
+        output_header_layout.addStretch()
+        
+        # Clear output button
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #cccccc;
+                border: none;
+                padding: 4px 12px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #505050;
+            }
+        """)
+        clear_btn.clicked.connect(lambda: self.output_text.clear())
+        output_header_layout.addWidget(clear_btn)
+        
+        output_layout.addWidget(output_header)
+        
+        # Output text area
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
-        self.output_text.setFont(QFont("Consolas" if QFont("Consolas").exactMatch() else "Courier New", 10))
+        self.output_text.setFont(QFont(
+            "Consolas" if QFont("Consolas").exactMatch() else "Courier New", 
+            10
+        ))
+        output_layout.addWidget(self.output_text)
         
-        # Add widgets to splitter
-        splitter.addWidget(self.editor)
-        splitter.addWidget(self.output_text)
-        splitter.setSizes([700, 300])
+        # Add panels to splitter
+        splitter.addWidget(editor_panel)
+        splitter.addWidget(output_panel)
+        splitter.setSizes([900, 500])
         
         main_layout.addWidget(splitter)
         
         # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready")
-    
+        self.status_label = QLabel("Ready")
+        self.status_bar.addWidget(self.status_label)
+        
+        # File info in status bar
+        self.file_label = QLabel("No file")
+        self.status_bar.addPermanentWidget(self.file_label)
+
     def create_actions(self):
+        """Create menu and toolbar actions"""
         # File actions
-        self.new_action = QAction("&New", self)
-        self.new_action.setShortcut("Ctrl+N")
+        self.new_action = QAction("New", self)
+        self.new_action.setShortcut(QKeySequence.StandardKey.New)
         self.new_action.triggered.connect(self.new_file)
         
-        self.open_action = QAction("&Open", self)
-        self.open_action.setShortcut("Ctrl+O")
+        self.open_action = QAction("Open", self)
+        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.open_file)
         
-        self.save_action = QAction("&Save", self)
-        self.save_action.setShortcut("Ctrl+S")
+        self.save_action = QAction("Save", self)
+        self.save_action.setShortcut(QKeySequence.StandardKey.Save)
         self.save_action.triggered.connect(self.save_file)
         
-        self.save_as_action = QAction("Save &As", self)
+        self.save_as_action = QAction("Save As", self)
         self.save_as_action.triggered.connect(self.save_file_as)
         
-        self.exit_action = QAction("E&xit", self)
+        self.exit_action = QAction("Exit", self)
         self.exit_action.triggered.connect(self.close)
         
-        # Edit actions
-        self.compile_action = QAction("&Compile", self)
-        self.compile_action.setShortcut("F5")
-        self.compile_action.triggered.connect(self.compile_code)
+        # Run action
+        self.run_action = QAction("Run", self)
+        self.run_action.setShortcut("F5")
+        self.run_action.triggered.connect(self.compile_code_backend)
         
-        # View actions
-        self.light_theme_action = QAction("&Light Theme", self)
+        # Theme actions
+        self.light_theme_action = QAction("Light Theme", self)
         self.light_theme_action.triggered.connect(self.apply_light_theme)
         
-        self.dark_theme_action = QAction("&Dark Theme", self)
+        self.dark_theme_action = QAction("Dark Theme", self)
         self.dark_theme_action.triggered.connect(self.apply_dark_theme)
-    
+        
+        # Debug action - Test error highlighting
+        self.test_error_action = QAction("Test Error Highlight (Line 4)", self)
+        self.test_error_action.triggered.connect(
+            lambda: self.editor.highlight_error_line(4)
+        )
+
     def create_menu(self):
+        """Create menu bar"""
         menubar = self.menuBar()
         
         # File menu
-        file_menu = menubar.addMenu("&File")
+        file_menu = menubar.addMenu("File")
         file_menu.addAction(self.new_action)
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.save_action)
@@ -370,24 +209,31 @@ class NovaLangIDE(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         
-        # Edit menu
-        edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction(self.compile_action)
+        # Run menu
+        run_menu = menubar.addMenu("Run")
+        run_menu.addAction(self.run_action)
         
         # View menu
-        view_menu = menubar.addMenu("&View")
+        view_menu = menubar.addMenu("View")
         view_menu.addAction(self.light_theme_action)
         view_menu.addAction(self.dark_theme_action)
-    
+        
+        # Debug menu (can be removed in production)
+        debug_menu = menubar.addMenu("Debug")
+        debug_menu.addAction(self.test_error_action)
+
     def create_toolbar(self):
+        """Create toolbar"""
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
         toolbar.addAction(self.new_action)
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.save_action)
         toolbar.addSeparator()
-        toolbar.addAction(self.compile_action)
+
+    # ==================== File Operations ====================
     
     def new_file(self):
         """Create a new file"""
@@ -395,13 +241,14 @@ class NovaLangIDE(QMainWindow):
             self.editor.set_text("")
             self.current_file = None
             self.setWindowTitle("NovaLang IDE - Untitled")
-            self.status_bar.showMessage("New file created", 3000)
-    
+            self.file_label.setText("No file")
+            self.status_label.setText("New file created")
+
     def open_file(self):
-        """Open a file"""
+        """Open an existing file"""
         if self.check_save():
             file_path, _ = QFileDialog.getOpenFileName(
-                self, "Open NovaLang File", "", 
+                self, "Open NovaLang File", "",
                 "NovaLang Files (*.nova);;All Files (*.*)"
             )
             if file_path:
@@ -410,12 +257,16 @@ class NovaLangIDE(QMainWindow):
                         content = f.read()
                     self.editor.set_text(content)
                     self.current_file = file_path
-                    self.setWindowTitle(f"NovaLang IDE - {os.path.basename(file_path)}")
-                    self.status_bar.showMessage(f"Opened: {file_path}", 3000)
+                    filename = os.path.basename(file_path)
+                    self.setWindowTitle(f"NovaLang IDE - {filename}")
+                    self.file_label.setText(filename)
+                    self.status_label.setText(f"Opened: {filename}")
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", 
-                                       f"Could not open file: {str(e)}")
-    
+                    QMessageBox.critical(
+                        self, "Error", 
+                        f"Could not open file:\n{str(e)}"
+                    )
+
     def save_file(self):
         """Save the current file"""
         if self.current_file is None:
@@ -424,37 +275,40 @@ class NovaLangIDE(QMainWindow):
             with open(self.current_file, 'w', encoding='utf-8') as f:
                 f.write(self.editor.get_text())
             self.editor.document().setModified(False)
-            self.status_bar.showMessage(f"Saved: {self.current_file}", 3000)
+            filename = os.path.basename(self.current_file)
+            self.status_label.setText(f"Saved: {filename}")
             return True
         except Exception as e:
-            QMessageBox.critical(self, "Error", 
-                               f"Could not save file: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", 
+                f"Could not save file:\n{str(e)}"
+            )
             return False
-    
+
     def save_file_as(self):
-        """Save file with a new name"""
+        """Save the current file with a new name"""
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save NovaLang File", "", 
+            self, "Save NovaLang File", "",
             "NovaLang Files (*.nova);;All Files (*.*)"
         )
         if file_path:
-            # Ensure .nova extension
             if not file_path.endswith('.nova'):
                 file_path += '.nova'
-            
             self.current_file = file_path
-            self.setWindowTitle(f"NovaLang IDE - {os.path.basename(file_path)}")
+            filename = os.path.basename(file_path)
+            self.setWindowTitle(f"NovaLang IDE - {filename}")
+            self.file_label.setText(filename)
             return self.save_file()
         return False
-    
+
     def check_save(self):
-        """Check if we need to save before closing/opening new file"""
+        """Check if the file needs to be saved before proceeding"""
         if self.editor.document().isModified():
             reply = QMessageBox.question(
                 self, "Save Changes",
                 "The document has been modified. Save changes?",
-                QMessageBox.StandardButton.Yes |
-                QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Yes | 
+                QMessageBox.StandardButton.No | 
                 QMessageBox.StandardButton.Cancel
             )
             if reply == QMessageBox.StandardButton.Yes:
@@ -462,90 +316,200 @@ class NovaLangIDE(QMainWindow):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return False
         return True
+
+    # ==================== Compilation ====================
     
-    def compile_code(self):
-        """Compile the current code"""
-        code = self.editor.get_text()
-        if not code.strip():
-            self.output_text.setText("No code to compile.")
+    def compile_code_backend(self):
+        """Compile the code using the backend compiler"""
+        if self.current_file is None:
+            self.save_file_as()
+            if self.current_file is None:
+                return
+        
+        # Save file before compiling
+        self.save_file()
+        
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        backend_exe = os.path.join(current_dir, "Project2.exe")
+        
+        if not os.path.exists(backend_exe):
+            self.output_text.setHtml(
+                f'<p style="color: #ff6b6b;"><b>❌ Error:</b> '
+                f'Backend compiler not found</p>'
+                f'<p style="color: #999;">Expected location: {backend_exe}</p>'
+            )
             return
         
-        self.status_bar.showMessage("Compiling...")
         self.output_text.clear()
-        
-        # Create and start compilation thread
-        self.compilation_thread = CompilationThread(code)
-        self.compilation_thread.compilation_done.connect(self.on_compilation_done)
-        self.compilation_thread.start()
-    
-    def on_compilation_done(self, message, success):
-        """Handle compilation result"""
-        if success:
-            self.output_text.setText(f"✅ {message}")
-            self.status_bar.showMessage("Compilation successful", 3000)
-        else:
-            self.output_text.setText(f"❌ {message}")
-            self.status_bar.showMessage("Compilation failed", 3000)
-    def on_compilation_done(self, message, success):
-        """Handle compilation result"""
-        # Clear previous error highlighting
         self.editor.clear_error_highlighting()
+        self.status_label.setText("⚙️ Compiling...")
+        self.run_btn.setEnabled(False)
         
-        if success:
-            self.output_text.setText(f"✅ {message}")
-            self.status_bar.showMessage("Compilation successful", 3000)
-        else:
-            self.output_text.setText(f"❌ {message}")
-            self.status_bar.showMessage("Compilation failed", 3000)
-
-            # --- New logic to extract and highlight error line ---
-            import re
+        try:
+            result = subprocess.run(
+                [backend_exe, self.current_file],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
             
-            # Regex to find line number from the error message.
-            # Assuming Lexer, Parser, and Semantic errors all contain 'line X'
-            match = re.search(r'line (\d+)', message)
+            output = result.stdout + result.stderr
             
-            if match:
-                line_num = int(match.group(1))
+            # Try multiple patterns to extract line number
+            line_num = None
+            
+            # First, look for "Error:" line which contains the actual error
+            error_line_match = re.search(r'Error:.*', output, re.IGNORECASE)
+            if error_line_match:
+                error_text = error_line_match.group(0)
+                print(f"DEBUG: Error line found: {error_text}")
+                
+                # Try to extract variable/identifier name from error
+                # Pattern: "undeclared variable 'result'" or similar
+                var_match = re.search(r"['\"](\w+)['\"]", error_text)
+                if var_match:
+                    var_name = var_match.group(1)
+                    print(f"DEBUG: Error involves identifier: {var_name}")
+                    
+                    # Find the line where this identifier appears
+                    # Look for IDENT('var_name') @LINE:COL pattern
+                    ident_pattern = rf"IDENT\(['\"]?{re.escape(var_name)}['\"]?\)\s+@(\d+):\d+"
+                    ident_matches = list(re.finditer(ident_pattern, output))
+                    if ident_matches:
+                        # Get the LAST occurrence of this identifier (where error likely is)
+                        line_num = int(ident_matches[-1].group(1))
+                        print(f"DEBUG: Found '{var_name}' at line {line_num}")
+            
+            # Pattern 2: "at 15:1" in the error line
+            if not line_num and error_line_match:
+                match = re.search(r'at\s+(\d+):\d+', error_line_match.group(0))
+                if match:
+                    line_num = int(match.group(1))
+                    print(f"DEBUG: Found line number in error: {line_num}")
+            
+            # Pattern 3: Look for the LAST non-EOF token before "Error:"
+            if not line_num:
+                # Find all @LINE:COL patterns, excluding EOF
+                matches = list(re.finditer(r"(?!EOF)IDENT.*?@(\d+):\d+", output))
+                if not matches:
+                    matches = list(re.finditer(r"(?!EOF)\w+\([^)]*\)\s+@(\d+):\d+", output))
+                if matches:
+                    # Get the last match before "Error:"
+                    error_pos = output.find('Error:')
+                    if error_pos > 0:
+                        for match in reversed(matches):
+                            if match.start() < error_pos:
+                                line_num = int(match.group(1))
+                                print(f"DEBUG: Found line number from last token before error: {line_num}")
+                                break
+            
+            # Pattern 4: "at 15:1" anywhere in output
+            if not line_num:
+                match = re.search(r'at\s+(\d+):\d+', output)
+                if match:
+                    line_num = int(match.group(1))
+                    print(f"DEBUG: Found line number using 'at LINE:COL': {line_num}")
+            
+            # Pattern 5: "line 4" or "Line 4"
+            if not line_num:
+                match = re.search(r'[Ll]ine\s+(\d+)', output)
+                if match:
+                    line_num = int(match.group(1))
+                    print(f"DEBUG: Found line number using 'line N': {line_num}")
+            
+            # Highlight the error line if found
+            if line_num and result.returncode != 0:
                 self.editor.highlight_error_line(line_num)
-                # Scroll to the error line for visibility
-                self.editor.ensureCursorVisible() 
-            # ---------------------------------------------------
-    def apply_light_theme(self):
-        """Apply light theme to the entire IDE"""
-        # Apply to editor
-        self.editor.apply_light_theme()
+            else:
+                if result.returncode != 0:
+                    print(f"DEBUG: No line number found in output: {output[:200]}")
+            
+            # Format output with colors
+            if result.returncode == 0:
+                self.output_text.setHtml(
+                    f'<p style="color: #4ec9b0;"><b>✓ Compilation Successful</b></p>'
+                    f'<pre style="color: #d4d4d4;">{output}</pre>'
+                )
+                self.status_label.setText("✓ Compilation successful")
+            else:
+                # Show line number in error message if found
+                error_msg = '✗ Compilation Failed'
+                if line_num:
+                    error_msg += f' (Line {line_num})'
+                
+                self.output_text.setHtml(
+                    f'<p style="color: #ff6b6b;"><b>{error_msg}</b></p>'
+                    f'<pre style="color: #f48771;">{output}</pre>'
+                )
+                status_msg = "✗ Compilation failed"
+                if line_num:
+                    status_msg += f" at line {line_num}"
+                self.status_label.setText(status_msg)
         
-        # Apply to output
+        except subprocess.TimeoutExpired:
+            self.output_text.setHtml(
+                '<p style="color: #ff6b6b;"><b>✗ Error:</b> '
+                'Compilation timed out</p>'
+            )
+            self.status_label.setText("✗ Timeout")
+        except Exception as e:
+            self.output_text.setHtml(
+                f'<p style="color: #ff6b6b;"><b>✗ Error:</b> {str(e)}</p>'
+            )
+            self.status_label.setText("✗ Error")
+        finally:
+            self.run_btn.setEnabled(True)
+
+    # ==================== Themes ====================
+    
+    def apply_light_theme(self):
+        """Apply light theme to the IDE"""
+        self.editor.apply_light_theme()
         self.output_text.setStyleSheet("""
             QTextEdit {
-                background-color: #f8f8f8;
-                color: #333;
+                background-color: #ffffff;
+                color: #333333;
                 border: none;
             }
         """)
-        
-        # Apply to main window
-        palette = QPalette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
-        palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
-        self.setPalette(palette)
-    
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f3f3f3;
+            }
+            QMenuBar {
+                background-color: #f3f3f3;
+                color: #333333;
+            }
+            QMenuBar::item:selected {
+                background-color: #e0e0e0;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #333333;
+            }
+            QToolBar {
+                background-color: #f3f3f3;
+                border-bottom: 1px solid #d0d0d0;
+            }
+            QStatusBar {
+                background-color: #007acc;
+                color: white;
+            }
+            QFrame {
+                background-color: #e8e8e8;
+            }
+        """)
+
     def apply_dark_theme(self):
-        """Apply dark theme to the entire IDE"""
-        # Apply to editor
+        """Apply dark theme to the IDE"""
         self.editor.apply_dark_theme()
-        
-        # Apply to output
         self.output_text.setStyleSheet("""
             QTextEdit {
-                background-color: #252525;
+                background-color: #1e1e1e;
                 color: #d4d4d4;
                 border: none;
             }
         """)
-        
-        # Apply dark theme to menu bar and toolbar
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2d2d30;
@@ -555,15 +519,8 @@ class NovaLangIDE(QMainWindow):
                 color: #d4d4d4;
                 border-bottom: 1px solid #3e3e42;
             }
-            QMenuBar::item {
-                background-color: transparent;
-                padding: 5px 10px;
-            }
             QMenuBar::item:selected {
                 background-color: #3e3e42;
-            }
-            QMenuBar::item:pressed {
-                background-color: #505050;
             }
             QMenu {
                 background-color: #2d2d30;
@@ -577,54 +534,43 @@ class NovaLangIDE(QMainWindow):
                 background-color: #2d2d30;
                 border-bottom: 1px solid #3e3e42;
                 spacing: 5px;
-                padding: 5px;
-            }
-            QToolButton {
-                background-color: transparent;
-                color: #d4d4d4;
-                border: 1px solid transparent;
-                border-radius: 4px;
-                padding: 5px;
             }
             QToolButton:hover {
                 background-color: #3e3e42;
-                border: 1px solid #505050;
-            }
-            QToolButton:pressed {
-                background-color: #505050;
+                border-radius: 3px;
             }
             QStatusBar {
-                background-color: #2d2d30;
-                color: #d4d4d4;
-                border-top: 1px solid #3e3e42;
+                background-color: #007acc;
+                color: white;
+            }
+            QFrame {
+                background-color: #333337;
+            }
+            QLabel {
+                color: #cccccc;
             }
         """)
 
     def load_sample_code(self):
-        """Load sample code into editor"""
-        sample_code = """start
-# Simple NovaLang program
+        """Load sample NovaLang code into the editor"""
+        sample = """start
+# Welcome to NovaLang IDE!
+# Press F5 or click Run to compile
+
 num count = 10
 text greeting = "Hello, NovaLang!"
 flag is_active = true
 
 show greeting
 
-# Conditional statement
 when count > 5 {
     show "Count is greater than 5"
-} elsewhen count == 5 {
-    show "Count is exactly 5"
-} else {
-    show "Count is less than 5"
 }
 
-# Loop example
 loop i = 1 to 5 {
     show i
 }
 
-# Function definition and call
 func multiply(x, y) {
     back x * y
 }
@@ -632,15 +578,10 @@ func multiply(x, y) {
 num result = multiply(3, 4)
 show result
 
-# Take input (simulated)
-text name = "User"
-take name
-show "Hello, " + name
-
 end
 """
-        self.editor.set_text(sample_code)
-    
+        self.editor.set_text(sample)
+
     def closeEvent(self, event):
         """Handle window close event"""
         if self.check_save():
@@ -648,17 +589,20 @@ end
         else:
             event.ignore()
 
+
+# ==================== Main ====================
+
 def main():
+    """Main entry point for the application"""
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    
-    # Set application icon and name
     app.setApplicationName("NovaLang IDE")
     
     ide = NovaLangIDE()
     ide.show()
     
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
